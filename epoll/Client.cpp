@@ -7,10 +7,12 @@
 #include <iostream>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <stdio.h>
 
 using namespace std;
 
-int main()
+int main(int argc, char* argv[])
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serveraddr = { 0 };
@@ -30,18 +32,24 @@ int main()
     {
         cin >> buf;
         int length = strlen(buf);
+        length += 4;
         memcpy(buf + 4, buf, strlen(buf));
         memcpy(buf, &length, 4);
-        int i = write(sockfd, buf, sizeof(buf));
+        int i = write(sockfd, buf, length);
+
         int n;
         char buff[1024] = { 0 };
         string s = "";
-        while ((n = read(sockfd, buff, strlen(buff))) > 0)
+        int size = 0;
+        while ((n = read(sockfd, buff, sizeof(buff))) > 0)
         {
             s += buff;
+            size += n;
         }
-
-        cout << "get: " << s << endl;
+        if (size > 0) 
+        {
+            cout << "receive: "<< s << endl;
+        }
     }
     close(sockfd);
 }

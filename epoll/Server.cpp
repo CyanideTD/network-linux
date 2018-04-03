@@ -1,4 +1,5 @@
 #include <iostream>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
@@ -10,7 +11,6 @@
 #include <string.h>
 #include <queue>
 #include <map>
-#include <hash_map>
 
 using namespace std;
 
@@ -40,20 +40,21 @@ void entity::add_data(string s)
 
 string entity::get_data() 
 {
-    return data;
+    return this->data;
 }
 
 int entity::getFD()
 {
-    return sockfd;
+    return this->sockfd;
 }
 
 entity::entity(int i, string s) :sockfd(i), data(s) {};
 
 queue<entity> receive_queue;
-hash_map<int, char*> send_map;
-hash_map<int, int> receive;
-hash_map<int, char*> receive_map;
+map<int, char*> send_map;
+map<int, int> receive;
+map<int, char*> receive_map;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int set_nonblock(int fd)
 {
@@ -63,23 +64,35 @@ static int set_nonblock(int fd)
 
 void send_messages(int epfd, epoll_event &ev) 
 {
-    hash_map<int, char*>::iterator it;
+    map<int, char*>::iterator it;
     it = send_map.begin();
     int n;
     while (it != send_map.end())
     {
-        while (n = write(epfd, it->second, strlen(it->second)) > 0)
+        cout << it -> second << endl;
+        while ((n = write(it->first, it->second, strlen(it->second))) > 0)
         {
             it->second += n;
         }
-        if (errno == EAGAIN)
+        if (n == -1)
         {
-            ev.data.fd = it->first;
-            ev.events = EPOLLOUT | EPOLLET;
-            epoll_ctl(epfd, EPOLL_CTL_MOD, it->first, &ev);
-        }
-        else
+            cout << errno << endl;
+            if (errno == EAGAIN)
+            {
+                ev.data.fd = it->first;
+                ev.events = EPOLLOUT | EPOLLET;
+                epoll_ctl(epfd, EPOLL_CTL_MOD, it->first, &ev);
+            }
+            else if (errno == ECONNRESET)
+            {
+                epoll_ctl(epfd, EPOLL_CTL_DEL, it->first, NULL);
+                close(it->first);
+                cout << "client close" << endl;
+                cout << "send error" << endl;
+            }
+        } else
         {
+            cout << "send success" << endl;
             send_map.erase(it);
         }
         it++;
@@ -120,7 +133,7 @@ void* network(void* arg)
 
     while (true)
     {
-        nfds = epoll_wait(epfd, events, 20, -1);
+        nfds = epoll_wait(epfd, events, 20, 100);
         for (int i = 0; i < nfds; i++)
         {
             if (events[i].data.fd == listenfd && events[i].events & EPOLLIN)
@@ -130,6 +143,7 @@ void* network(void* arg)
                 if (connfd < 0)
                 {
                     perror("error when connected");
+                    continue;
                 }
                 set_nonblock(connfd);
                 char* str = inet_ntoa(clientaddr.sin_addr);
@@ -140,31 +154,34 @@ void* network(void* arg)
             }
             else if (events[i].events & EPOLLIN)
             {
-                bool flag = true;
+                bool flag = false;
                 sockfd = events[i].data.fd;
-                char line[1024] = "";
+                char line[1024] = { 0 };
                 int k = 0;
                 string s = "";
+                int size = 0;
                 k = read(sockfd, line, 1024);
+                size += k;
 
-                if (k == 0)
+                if (k <= 0)
                 {
                     epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, NULL);
                     close(sockfd);
                     cout << "client close" << endl;
+                    send_map.erase(sockfd);
                     continue;
-                }
+                } 
 
                 if (receive.count(sockfd) == 1)
                 {
-                    flag = false;
-                    hash_map<int, int>::iterator iter1 = receive.find(sockfd);
+                    flag = true;
+                    map<int, int>::iterator iter1 = receive.find(sockfd);
                     n = iter1->second;
                     n -= k;
                     s += line;
                 }
 
-                if (!flag)
+                if (flag)
                 {
                     string prev = receive_map[sockfd];
                     while ((k = read(sockfd, line, sizeof(line))) > 0)
@@ -178,11 +195,13 @@ void* network(void* arg)
                     if (n > 0)
                     {
                         receive_map[sockfd] = (char*) prev.data();
+                        receive[sockfd] = n;
                     }
                     else
                     {
                         receive_queue.push(entity(sockfd, s));
                         receive_map.erase(sockfd);
+                        receive.erase(sockfd);
                     }
                 }
                 else
@@ -190,12 +209,12 @@ void* network(void* arg)
                     int length;
                     memcpy(&length, line, 4);
                     length -= k;
-                    s += line;
-                    while ((k = read(sockfd, line, sizeof(line))) > 0)
+                    while ((k = read(sockfd, line + size, sizeof(line))) > 0)
                     {
                         n -= k;
-                        s += line;
+                        size += k;
                     }
+
                     if (length > 0)
                     {
                         receive[sockfd] = length;
@@ -203,6 +222,9 @@ void* network(void* arg)
                     }
                     else
                     {
+                        cout << "receive success" << endl;
+                        line[size] = '\0';
+                        s = line + 4;
                         receive_queue.push(entity(sockfd, s));
                     }
                 }
@@ -221,7 +243,7 @@ void* network(void* arg)
                 {
                     p += n;
                 }
-                if (errno == EAGAIN)
+                if (n == -1 && errno == EAGAIN)
                 {
                     ev.data.fd = sockfd;
                     ev.events = EPOLLOUT | EPOLLET;
@@ -235,6 +257,9 @@ void* network(void* arg)
                 }
             }
         }
+        pthread_mutex_lock(&mutex);
+        send_messages(epfd, ev);
+        pthread_mutex_unlock(&mutex);
     }
 }
 
@@ -246,8 +271,14 @@ void* process(void* args)
         {
             entity buf = receive_queue.front();
             receive_queue.pop();
+            if (send_map.count(buf.getFD()) == 1) 
+            {
+                receive_queue.push(buf);
+                continue;
+            }
             buf.add_data(" processed");
-            send_map[buf.getFD()] = buf.get_data();
+            string s = buf.get_data();
+            send_map[buf.getFD()] = (char*) s.data();
         }
     }
 }
